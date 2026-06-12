@@ -14,6 +14,14 @@ from astrbot.api import logger
     "v1.0.0",
 )
 class GroupForwardPlugin(Star):
+    # 内容类型分组：
+    #   文字类（send_text）：文字、文件、@、语音
+    #   图片类（send_image）：图片、表情、视频
+    #   聊天记录（send_forward）：合并转发
+    TEXT_TYPES = {"text", "file", "at", "record"}
+    IMAGE_TYPES = {"image", "face", "video"}
+    FORWARD_TYPES = {"forward"}
+
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
         self.config = config
@@ -22,17 +30,46 @@ class GroupForwardPlugin(Star):
 
     # ---------- 工具方法 ----------
 
-    def _build_index(self) -> dict[str, list[str]]:
-        """把 rules 整理成 {源群号: [目标群号...]} 的索引。"""
-        index: dict[str, list[str]] = {}
+    def _get_rule(self, source_group: str) -> dict | None:
+        """取得某源群的转发规则（rules 即群白名单）；不在名单或在群黑名单则返回 None。"""
+        group_blacklist = [str(g) for g in self.config.get("group_blacklist", [])]
+        if source_group in group_blacklist:
+            return None
         for rule in self.config.get("rules", []):
-            source = str(rule.get("source", "")).strip()
-            if not source:
+            if str(rule.get("source", "")).strip() != source_group:
                 continue
             targets = [str(t).strip() for t in rule.get("targets", []) if str(t).strip()]
-            if targets:
-                index.setdefault(source, []).extend(targets)
-        return index
+            if not targets:
+                return None
+            return {
+                "source": source_group,
+                "targets": targets,
+                "send_text": bool(rule.get("send_text", True)),
+                "send_image": bool(rule.get("send_image", True)),
+                "send_forward": bool(rule.get("send_forward", True)),
+                "output_mode": str(rule.get("output_mode", "original")).strip() or "original",
+            }
+        return None
+
+    def _filter_by_content(self, segments, rule) -> list:
+        """按该群启用的内容类型过滤消息段，未启用类型的段会被丢弃。"""
+        result = []
+        for seg in segments:
+            t = seg.get("type")
+            if t in self.FORWARD_TYPES:
+                if rule["send_forward"]:
+                    result.append(seg)
+            elif t in self.IMAGE_TYPES:
+                if rule["send_image"]:
+                    result.append(seg)
+            elif t in self.TEXT_TYPES:
+                if rule["send_text"]:
+                    result.append(seg)
+            else:
+                # 未知类型（如 reply、json 等）归入文字类处理
+                if rule["send_text"]:
+                    result.append(seg)
+        return result
 
     def _is_admin(self, event: AstrMessageEvent) -> bool:
         admins = [str(a) for a in self.config.get("admins", [])]
@@ -77,9 +114,8 @@ class GroupForwardPlugin(Star):
             return
 
         source_group = str(event.get_group_id())
-        index = self._build_index()
-        targets = index.get(source_group)
-        if not targets:
+        rule = self._get_rule(source_group)
+        if not rule:
             return
 
         sender_id = str(event.get_sender_id())
@@ -87,7 +123,7 @@ class GroupForwardPlugin(Star):
         if not self._passes_filters(event, sender_id, text):
             return
 
-        # 取 OneBot 原始消息段数组，原样转发（保留图片/文件/语音/表情等）
+        # 取 OneBot 原始消息段数组（保留图片/文件/语音/表情等）
         raw = getattr(event.message_obj, "raw_message", None)
         segments = None
         if isinstance(raw, dict):
@@ -96,34 +132,56 @@ class GroupForwardPlugin(Star):
             # 兜底：至少转发纯文本
             segments = [{"type": "text", "data": {"text": text}}]
 
+        # 按该群启用的内容类型过滤；过滤后无内容则不转发
+        segments = self._filter_by_content(segments, rule)
+        if not segments:
+            return
+
         client = event.bot
 
-        # 可选增强：@ 转纯文本、合并转发展开
+        # 可选增强：@ 转纯文本、合并转发展开（仅当该群启用聊天记录时才展开）
         if self.config.get("at_to_text", True):
             segments = self._at_to_text(segments)
-        if self.config.get("expand_forward", True):
+        if rule["send_forward"] and self.config.get("expand_forward", True):
             segments = await self._expand_forward(client, segments)
 
-        outgoing = self._with_prefix(event, source_group, sender_id, segments)
+        sender_name = event.get_sender_name() or sender_id
 
-        for target in targets:
+        for target in rule["targets"]:
             if target == source_group:
                 continue  # 防止自我回环
             wait = self._throttle(target)
             if wait:
                 await asyncio.sleep(wait)
             try:
-                await client.send_group_msg(group_id=int(target), message=outgoing)
+                await self._send(
+                    client, int(target), rule, source_group, sender_id, sender_name, segments
+                )
                 self._last_sent[target] = time.time()
             except Exception as e:
                 logger.error(f"[group_forward] 转发到群 {target} 失败: {e}")
 
-    def _with_prefix(self, event, source_group, sender_id, segments):
+    async def _send(self, client, target, rule, source_group, sender_id, sender_name, segments):
+        """按规则的输出形式发送：original=原样，merged=合并转发卡片。"""
+        if rule["output_mode"] == "merged":
+            node = {
+                "type": "node",
+                "data": {
+                    "name": sender_name,
+                    "uin": str(sender_id),
+                    "content": segments,
+                },
+            }
+            await client.send_group_forward_msg(group_id=target, messages=[node])
+        else:
+            outgoing = self._with_prefix(source_group, sender_id, sender_name, segments)
+            await client.send_group_msg(group_id=target, message=outgoing)
+
+    def _with_prefix(self, source_group, sender_id, sender_name, segments):
         """在消息段前加上来源前缀。"""
         fmt = self.config.get("prefix_format", "")
         if not fmt:
             return segments
-        sender_name = event.get_sender_name() or sender_id
         prefix = fmt.format(
             group_id=source_group,
             sender_id=sender_id,
@@ -228,11 +286,20 @@ class GroupForwardPlugin(Star):
         lines = ["当前转发规则："]
         for i, r in enumerate(rules, 1):
             targets = ",".join(str(t) for t in r.get("targets", []))
-            lines.append(f"{i}. {r.get('source')} -> {targets}")
+            content = "".join([
+                "文" if r.get("send_text", True) else "·",
+                "图" if r.get("send_image", True) else "·",
+                "记" if r.get("send_forward", True) else "·",
+            ])
+            mode = "记录卡片" if str(r.get("output_mode", "original")) == "merged" else "原样"
+            lines.append(f"{i}. {r.get('source')} -> {targets} [内容:{content} 形式:{mode}]")
+        gbl = ",".join(str(g) for g in self.config.get("group_blacklist", [])) or "无"
         wl = ",".join(str(w) for w in self.config.get("whitelist", [])) or "无"
         bl = ",".join(str(b) for b in self.config.get("blacklist", [])) or "无"
-        lines.append(f"白名单：{wl}")
-        lines.append(f"黑名单：{bl}")
+        lines.append(f"群黑名单：{gbl}")
+        lines.append(f"用户白名单：{wl}")
+        lines.append(f"用户黑名单：{bl}")
+        lines.append("内容标记：文=文字类 图=图片类 记=聊天记录")
         yield event.plain_result("\n".join(lines))
 
     @forward.command("add")
@@ -251,10 +318,67 @@ class GroupForwardPlugin(Star):
                 self.config.save_config()
                 yield event.plain_result(f"已添加：{source} -> {target}")
                 return
-        rules.append({"source": source, "targets": [target]})
+        rules.append({
+            "source": source,
+            "targets": [target],
+            "send_text": True,
+            "send_image": True,
+            "send_forward": True,
+            "output_mode": "original",
+        })
         self.config["rules"] = rules
         self.config.save_config()
-        yield event.plain_result(f"已新建规则：{source} -> {target}")
+        yield event.plain_result(f"已新建规则：{source} -> {target}（默认转发全部内容、原样形式）")
+
+    @forward.command("content")
+    async def forward_content(self, event: AstrMessageEvent, source: str, kind: str, switch: str):
+        """开关某源群的内容类型。kind: text|image|forward，switch: on|off"""
+        if not self._is_admin(event):
+            return
+        source = str(source)
+        key_map = {"text": "send_text", "image": "send_image", "forward": "send_forward"}
+        label_map = {"text": "文字类", "image": "图片类", "forward": "聊天记录"}
+        key = key_map.get(kind)
+        if key is None or switch not in ("on", "off"):
+            yield event.plain_result("用法：/forward content <源群> <text|image|forward> <on|off>")
+            return
+        rules = self.config.get("rules", [])
+        for r in rules:
+            if str(r.get("source")) == source:
+                r[key] = (switch == "on")
+                self.config["rules"] = rules
+                self.config.save_config()
+                state = "开启" if switch == "on" else "关闭"
+                yield event.plain_result(f"群 {source} 的【{label_map[kind]}】转发已{state}")
+                return
+        yield event.plain_result(f"未找到源群 {source} 的规则，请先 /forward add。")
+
+    @forward.command("mode")
+    async def forward_mode(self, event: AstrMessageEvent, source: str, mode: str):
+        """设置某源群的输出形式。mode: original|merged"""
+        if not self._is_admin(event):
+            return
+        source = str(source)
+        if mode not in ("original", "merged"):
+            yield event.plain_result("用法：/forward mode <源群> <original|merged>")
+            return
+        rules = self.config.get("rules", [])
+        for r in rules:
+            if str(r.get("source")) == source:
+                r["output_mode"] = mode
+                self.config["rules"] = rules
+                self.config.save_config()
+                label = "聊天记录卡片" if mode == "merged" else "原样"
+                yield event.plain_result(f"群 {source} 的转发形式已设为【{label}】")
+                return
+        yield event.plain_result(f"未找到源群 {source} 的规则，请先 /forward add。")
+
+    @forward.command("gbl")
+    async def forward_gbl(self, event: AstrMessageEvent, action: str, group: str):
+        """群黑名单增删。"""
+        if not self._is_admin(event):
+            return
+        yield event.plain_result(self._edit_list("group_blacklist", "群黑名单", action, str(group)))
 
     @forward.command("del")
     async def forward_del(self, event: AstrMessageEvent, source: str, target: str):
