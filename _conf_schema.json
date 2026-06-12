@@ -1,0 +1,68 @@
+{
+  "rules": {
+    "description": "转发规则列表。每条规则把一个源群的消息转发到一个或多个目标群。",
+    "type": "list",
+    "hint": "格式：源群号 -> 目标群号1,目标群号2（机器人需同时在这些群里）",
+    "default": [],
+    "items": {
+      "type": "object",
+      "config_template": {
+        "source": {
+          "description": "源群号",
+          "type": "string",
+          "default": ""
+        },
+        "targets": {
+          "description": "目标群号列表",
+          "type": "list",
+          "default": []
+        }
+      }
+    }
+  },
+  "whitelist": {
+    "description": "白名单 QQ 号。非空时，只有名单内成员的消息才会被转发。",
+    "type": "list",
+    "default": []
+  },
+  "blacklist": {
+    "description": "黑名单 QQ 号。名单内成员的消息不会被转发。优先级高于白名单。",
+    "type": "list",
+    "default": []
+  },
+  "forward_self": {
+    "description": "是否转发机器人自己发送的消息（建议关闭以防回环）。",
+    "type": "bool",
+    "default": false
+  },
+  "prefix_format": {
+    "description": "转发消息的前缀模板。可用变量：{group_id} 源群号、{sender_id} 发送者QQ、{sender_name} 发送者昵称。留空则不加前缀。",
+    "type": "string",
+    "default": "[{sender_name}({sender_id})]:\n"
+  },
+  "keyword_block": {
+    "description": "关键词黑名单。消息文本中命中任一关键词则不转发。",
+    "type": "list",
+    "default": []
+  },
+  "at_to_text": {
+    "description": "是否把消息中的 @某人 转换成纯文本昵称（如 @张三）。跨群转发时目标群没有对应成员，开启后更易读。",
+    "type": "bool",
+    "default": true
+  },
+  "expand_forward": {
+    "description": "是否展��合并转发消息（把聊天记录里的每条内容展开成文本一并转发）。关闭则按原始段透传。",
+    "type": "bool",
+    "default": true
+  },
+  "throttle_seconds": {
+    "description": "同一目标群两次转发之间的最小间隔（秒），用于规避风控。0 表示不限制。",
+    "type": "float",
+    "default": 0.5
+  },
+  "admins": {
+    "description": "可以使用 /forward 管理指令的管理员 QQ 号。留空则仅 AstrBot 全局管理员可用。",
+    "type": "list",
+    "default": []
+  }
+}
