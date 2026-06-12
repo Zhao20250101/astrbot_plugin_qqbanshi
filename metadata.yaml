@@ -1,4 +1,4 @@
-name: astrbot_plugin_group_forward
+name: astrbot_plugin_qqbanshi
 desc: 将指定 QQ 群的聊天内容转发到其它 QQ 群，支持全内容转发、白名单/黑名单、指令动态管理
 version: v1.0.0
 author: you

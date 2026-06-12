@@ -1,4 +1,4 @@
-# astrbot_plugin_group_forward
+# astrbot_plugin_qqbanshi
 
 将指定 QQ 群的聊天内容转发到其它 QQ 群的 AstrBot 插件。
 
@@ -19,7 +19,7 @@
 
 ## 安装
 
-把整个 `astrbot_plugin_group_forward` 目录放到 AstrBot 的 `data/plugins/` 下，重启或在管理面板重载插件。
+把整个 `astrbot_plugin_qqbanshi` 目录放到 AstrBot 的 `data/plugins/` 下，重启或在管理面板重载插件。
 
 ## 配置
 

@@ -8,7 +8,7 @@ from astrbot.api import logger
 
 
 @register(
-    "astrbot_plugin_group_forward",
+    "astrbot_plugin_qqbanshi",
     "you",
     "将指定 QQ 群的聊天内容转发到其它 QQ 群",
     "v1.0.0",
